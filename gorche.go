@@ -37,20 +37,14 @@ func newCacheClient() *redis.Client {
 	})
 }
 
-type Person struct {
-	PersonID  uint
-	FirstName string
-	LastName  string
-	Nickname  string
-	Age       uint
+type Table struct {
+	name   string
+	schema interface{}
+	cache  *redis.Client
+	db     *gorm.DB
 }
 
-type Connector struct {
-	cacheClient    *redis.Client
-	databaseClient *gorm.DB
-}
-
-func NewConnector() (*Connector, error) {
+func NewTable(name string, schema interface{}) (*Table, error) {
 	databaseClient, err := newDatabaseClient()
 	if err != nil {
 		return nil, err
@@ -58,24 +52,37 @@ func NewConnector() (*Connector, error) {
 
 	cacheClient := newCacheClient()
 
-	return &Connector{
-		cacheClient:    cacheClient,
-		databaseClient: databaseClient,
+	return &Table{
+		name:   name,
+		schema: schema,
+		cache:  cacheClient,
+		db:     databaseClient,
 	}, nil
 }
 
-func (c *Connector) Close() {
-	c.cacheClient.Close()
+func (tb *Table) Close() error {
+	err := tb.cache.Close()
+	if err != nil {
+		return fmt.Errorf("error closing the gorche connector: %v", err)
+	}
+	return nil
 }
 
-func (c *Connector) First(ctx context.Context) (string, error) {
-	person := Person{}
-	q := c.databaseClient.WithContext(ctx).First(&person)
-	if q.Error != nil {
-		return "", q.Error
+func (tb *Table) First(ctx context.Context) (map[string]string, error) {
+	chq := tb.cache.HGetAll(ctx, "people:first")
+	if chq.Err() == nil {
+		return chq.Val(), nil
 	}
-	if q.RowsAffected == 0 {
-		return "", errors.New("no rows affected")
+
+	dbq := tb.db.WithContext(ctx).Table(tb.name).First(tb.schema)
+	if dbq.Error != nil {
+		return nil, dbq.Error
 	}
-	return fmt.Sprintf("%s %s %d", person.FirstName, person.LastName, person.Age), nil
+	if dbq.RowsAffected == 0 {
+		return nil, errors.New("no rows affected")
+	}
+
+	err := tb.cache.HSet(ctx, "people:first", map[string]any{}).Err()
+
+	return map[string]string{}, err
 }

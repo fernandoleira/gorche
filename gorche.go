@@ -39,10 +39,10 @@ func newCacheClient(ops *Options) *redis.Client {
 	})
 }
 
-func SchemaToMap(sch interface{}) (map[string]string, error) {
+func ModelToMap(sch interface{}) (map[string]string, error) {
 	t := reflect.TypeOf(sch).Elem()
 	if t.Kind() != reflect.Struct {
-		return nil, fmt.Errorf("schema with type %v is unsupported. Only struct schemas are supported", t.Kind().String())
+		return nil, fmt.Errorf("model with type %v is unsupported. Only struct models are supported", t.Kind().String())
 	}
 
 	m := make(map[string]string)
@@ -68,14 +68,18 @@ func SchemaToMap(sch interface{}) (map[string]string, error) {
 	return m, nil
 }
 
-type Table struct {
-	name   string
-	schema interface{}
-	cache  *redis.Client
-	db     *gorm.DB
+type Conn struct {
+	name  string
+	model interface{}
+	cache *redis.Client
+	db    *gorm.DB
 }
 
-func NewTable(name string, schema interface{}, ops *Options) (*Table, error) {
+func NewConn(name string, mdl interface{}, ops *Options) (*Conn, error) {
+	if reflect.TypeOf(mdl).Kind() != reflect.Ptr {
+		return nil, fmt.Errorf("cannot use a non pointer value as the model of the table")
+	}
+
 	databaseClient, err := newDatabaseClient(ops)
 	if err != nil {
 		return nil, err
@@ -83,16 +87,16 @@ func NewTable(name string, schema interface{}, ops *Options) (*Table, error) {
 
 	cacheClient := newCacheClient(ops)
 
-	return &Table{
-		name:   name,
-		schema: schema,
-		cache:  cacheClient,
-		db:     databaseClient,
+	return &Conn{
+		name:  name,
+		model: mdl,
+		cache: cacheClient,
+		db:    databaseClient,
 	}, nil
 }
 
-func (tb *Table) Close() error {
-	err := tb.cache.Close()
+func (c *Conn) Close() error {
+	err := c.cache.Close()
 	if err != nil {
 		return fmt.Errorf("error closing the gorche connector: %v", err)
 	}
@@ -104,26 +108,26 @@ func (tb *Table) Close() error {
 // The function will query the cache first to check if the value was previously
 // indexed. If not, it will query the database and store its value in the cache
 // before returning.
-func (tb *Table) First(ctx context.Context) (map[string]string, error) {
-	chq := tb.cache.HGetAll(ctx, fmt.Sprintf("%s:first", tb.name))
-	if chq.Err() == nil && len(chq.Val()) > 0 {
-		return chq.Val(), nil
+func (c *Conn) First(ctx context.Context) (map[string]string, error) {
+	cacheq := c.cache.HGetAll(ctx, fmt.Sprintf("%s:first", c.name))
+	if cacheq.Err() == nil && len(cacheq.Val()) > 0 {
+		return cacheq.Val(), nil
 	}
 
-	q := tb.db.WithContext(ctx).Table(tb.name).First(tb.schema)
-	if q.Error != nil {
-		return nil, q.Error
+	dbq := c.db.WithContext(ctx).Table(c.name).First(c.model)
+	if dbq.Error != nil {
+		return nil, dbq.Error
 	}
-	if q.RowsAffected == 0 {
+	if dbq.RowsAffected == 0 {
 		return nil, errors.New("no rows affected")
 	}
 
-	raw, err := SchemaToMap(tb.schema)
+	raw, err := ModelToMap(c.model)
 	if err != nil {
 		return nil, fmt.Errorf("could not convert schema to map: %v", err)
 	}
 
-	err = tb.cache.HSet(ctx, fmt.Sprintf("%s:first", tb.name), raw).Err()
+	err = c.cache.HSet(ctx, fmt.Sprintf("%s:first", c.name), raw).Err()
 
 	return raw, err
 }

@@ -12,41 +12,41 @@ import (
 	"gorm.io/gorm"
 )
 
-const (
-	DATABASE_ADDR = "localhost"
-	DATABASE_PORT = 5432
-	DATABASE_USER = "admin"
-	DATABASE_PWD  = "postgres"
-	DATABASE_DB   = "gorche"
-	DATABASE_TMZ  = "US/Eastern"
-	CACHE_ADDR    = "localhost"
-	CACHE_PORT    = 6379
-	CACHE_DB      = 0
-)
+type Options struct {
+	DBAddr    string
+	DBPort    int
+	DBUser    string
+	DBPwd     string
+	DBName    string
+	DBTmz     string
+	CacheAddr string
+	CachePort int
+	CacheDB   int
+}
 
 // PostgresDSN returns the DSN to open the Postgres database connection.
-var PostgresDSN = func() string {
-	return fmt.Sprintf("host=%v port=%v user=%v password=%v dbname=%v sslmode=disable TimeZone=%v", DATABASE_ADDR, DATABASE_PORT, DATABASE_USER, DATABASE_PWD, DATABASE_DB, DATABASE_TMZ)
+var PostgresDSN = func(ops *Options) string {
+	return fmt.Sprintf("host=%v port=%v user=%v password=%v dbname=%v sslmode=disable TimeZone=%v", ops.DBAddr, ops.DBPort, ops.DBUser, ops.DBPwd, ops.DBName, ops.DBTmz)
 }
 
-func newDatabaseClient() (*gorm.DB, error) {
-	return gorm.Open(postgres.Open(PostgresDSN()), &gorm.Config{})
+func newDatabaseClient(ops *Options) (*gorm.DB, error) {
+	return gorm.Open(postgres.Open(PostgresDSN(ops)), &gorm.Config{})
 }
 
-func newCacheClient() *redis.Client {
+func newCacheClient(ops *Options) *redis.Client {
 	return redis.NewClient(&redis.Options{
-		Addr: fmt.Sprintf("%s:%d", CACHE_ADDR, CACHE_PORT),
+		Addr: fmt.Sprintf("%s:%d", ops.CacheAddr, ops.CachePort),
 	})
 }
 
 func SchemaToMap(sch interface{}) (map[string]string, error) {
-	t := reflect.TypeOf(sch)
+	t := reflect.TypeOf(sch).Elem()
 	if t.Kind() != reflect.Struct {
 		return nil, fmt.Errorf("schema with type %v is unsupported. Only struct schemas are supported", t.Kind().String())
 	}
 
 	m := make(map[string]string)
-	v := reflect.ValueOf(sch)
+	v := reflect.ValueOf(sch).Elem()
 	for i := 0; i < v.NumField(); i++ {
 		key := t.Field(i)
 		val := v.Field(i)
@@ -75,13 +75,13 @@ type Table struct {
 	db     *gorm.DB
 }
 
-func NewTable(name string, schema interface{}) (*Table, error) {
-	databaseClient, err := newDatabaseClient()
+func NewTable(name string, schema interface{}, ops *Options) (*Table, error) {
+	databaseClient, err := newDatabaseClient(ops)
 	if err != nil {
 		return nil, err
 	}
 
-	cacheClient := newCacheClient()
+	cacheClient := newCacheClient(ops)
 
 	return &Table{
 		name:   name,
@@ -105,16 +105,16 @@ func (tb *Table) Close() error {
 // indexed. If not, it will query the database and store its value in the cache
 // before returning.
 func (tb *Table) First(ctx context.Context) (map[string]string, error) {
-	chq := tb.cache.HGetAll(ctx, "people:first")
-	if chq.Err() == nil {
+	chq := tb.cache.HGetAll(ctx, fmt.Sprintf("%s:first", tb.name))
+	if chq.Err() == nil && len(chq.Val()) > 0 {
 		return chq.Val(), nil
 	}
 
-	dbq := tb.db.WithContext(ctx).Table(tb.name).First(tb.schema)
-	if dbq.Error != nil {
-		return nil, dbq.Error
+	q := tb.db.WithContext(ctx).Table(tb.name).First(tb.schema)
+	if q.Error != nil {
+		return nil, q.Error
 	}
-	if dbq.RowsAffected == 0 {
+	if q.RowsAffected == 0 {
 		return nil, errors.New("no rows affected")
 	}
 
@@ -123,7 +123,7 @@ func (tb *Table) First(ctx context.Context) (map[string]string, error) {
 		return nil, fmt.Errorf("could not convert schema to map: %v", err)
 	}
 
-	err = tb.cache.HSet(ctx, "people:first", raw).Err()
+	err = tb.cache.HSet(ctx, fmt.Sprintf("%s:first", tb.name), raw).Err()
 
 	return raw, err
 }

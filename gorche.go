@@ -2,14 +2,13 @@ package gorche
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"reflect"
 	"strconv"
+	"strings"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/redis/go-redis/v9"
-	"gorm.io/driver/postgres"
-	"gorm.io/gorm"
 )
 
 type Options struct {
@@ -25,12 +24,13 @@ type Options struct {
 }
 
 // PostgresDSN returns the DSN to open the Postgres database connection.
+// urlExample := "postgres://username:password@localhost:5432/database_name"
 var PostgresDSN = func(ops *Options) string {
-	return fmt.Sprintf("host=%v port=%v user=%v password=%v dbname=%v sslmode=disable TimeZone=%v", ops.DBAddr, ops.DBPort, ops.DBUser, ops.DBPwd, ops.DBName, ops.DBTmz)
+	return fmt.Sprintf("postgres://%v:%v@%v:%v/%v", ops.DBUser, ops.DBPwd, ops.DBAddr, ops.DBPort, ops.DBName)
 }
 
-func newDatabaseClient(ops *Options) (*gorm.DB, error) {
-	return gorm.Open(postgres.Open(PostgresDSN(ops)), &gorm.Config{})
+func newDatabaseClient(ctx context.Context, ops *Options) (*pgx.Conn, error) {
+	return pgx.Connect(ctx, PostgresDSN(ops))
 }
 
 func newCacheClient(ops *Options) *redis.Client {
@@ -69,18 +69,14 @@ func ModelToMap(sch interface{}) (map[string]string, error) {
 }
 
 type Conn struct {
-	name  string
-	model interface{}
-	cache *redis.Client
-	db    *gorm.DB
+	name   string
+	colums []string
+	cache  *redis.Client
+	db     *pgx.Conn
 }
 
-func NewConn(name string, mdl interface{}, ops *Options) (*Conn, error) {
-	if reflect.TypeOf(mdl).Kind() != reflect.Ptr {
-		return nil, fmt.Errorf("cannot use a non pointer value as the model of the table")
-	}
-
-	databaseClient, err := newDatabaseClient(ops)
+func NewConn(ctx context.Context, name string, colums []string, ops *Options) (*Conn, error) {
+	databaseClient, err := newDatabaseClient(ctx, ops)
 	if err != nil {
 		return nil, err
 	}
@@ -88,17 +84,21 @@ func NewConn(name string, mdl interface{}, ops *Options) (*Conn, error) {
 	cacheClient := newCacheClient(ops)
 
 	return &Conn{
-		name:  name,
-		model: mdl,
-		cache: cacheClient,
-		db:    databaseClient,
+		name:   name,
+		colums: colums,
+		cache:  cacheClient,
+		db:     databaseClient,
 	}, nil
 }
 
-func (c *Conn) Close() error {
-	err := c.cache.Close()
+func (c *Conn) Close(ctx context.Context) error {
+	err := c.db.Close(ctx)
 	if err != nil {
-		return fmt.Errorf("error closing the gorche connector: %v", err)
+		return fmt.Errorf("error closing the database connector: %v", err)
+	}
+	err = c.cache.Close()
+	if err != nil {
+		return fmt.Errorf("error closing the cache connector: %v", err)
 	}
 	return nil
 }
@@ -114,20 +114,44 @@ func (c *Conn) First(ctx context.Context) (map[string]string, error) {
 		return cacheq.Val(), nil
 	}
 
-	dbq := c.db.WithContext(ctx).Table(c.name).First(c.model)
-	if dbq.Error != nil {
-		return nil, dbq.Error
-	}
-	if dbq.RowsAffected == 0 {
-		return nil, errors.New("no rows affected")
+	row := c.db.QueryRow(ctx, fmt.Sprintf("select %s from %s limit 1", strings.Join(c.colums, ", "), c.name))
+	raw := make(map[string]string)
+	for _, col := range c.colums {
+		sc := []any{"", "", "", 0}
+		err := row.Scan(sc...)
+		if err != nil {
+			return nil, fmt.Errorf("error scanning row: %v", err)
+		}
+		fmt.Println(col)
+		//raw[col] = sc
 	}
 
-	raw, err := ModelToMap(c.model)
-	if err != nil {
-		return nil, fmt.Errorf("could not convert schema to map: %v", err)
-	}
+	// raw, err := ModelToMap(c.model)
+	// if err != nil {
+	// 	return nil, fmt.Errorf("could not convert schema to map: %v", err)
+	// }
 
-	err = c.cache.HSet(ctx, fmt.Sprintf("%s:first", c.name), raw).Err()
+	err := c.cache.HSet(ctx, fmt.Sprintf("%s:first", c.name), raw).Err()
 
 	return raw, err
+}
+
+// Query runs a select call in the database.
+func (c *Conn) Query() (map[string]string, error) {
+	return nil, fmt.Errorf("unimplemented")
+}
+
+// Insert adds a new record to the database and saves it in the cache.
+func (c *Conn) Insert(ctx context.Context) error {
+	return fmt.Errorf("unimplemented")
+}
+
+// Update updates an existing record in the database.
+func (c *Conn) Update(ctx context.Context) error {
+	return fmt.Errorf("unimplemented")
+}
+
+// Delete removes a record from the database and the cache if it exists.
+func (c *Conn) Delete(ctx context.Context) error {
+	return fmt.Errorf("unimplemented")
 }
